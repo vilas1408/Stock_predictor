@@ -15,16 +15,25 @@ def fetch_data(symbol):
         intraday = historical.tail(1)
     return historical, intraday
 
-# Fundamental Analysis
-def fundamental_analysis(ticker):
+# Fundamental Analysis (adjusted for indices)
+def fundamental_analysis(ticker, symbol):
     info = ticker.info
-    return {
-        'P/E': info.get('trailingPE', 'N/A'),
-        'EPS': info.get('trailingEps', 'N/A'),
-        'Revenue (Cr)': info.get('totalRevenue', 'N/A') / 10**7,
-        'Profit Margin (%)': info.get('profitMargins', 'N/A') * 100,
-        'Market Cap (Cr)': info.get('marketCap', 'N/A') / 10**7
-    }
+    if symbol.startswith('^'):  # Index
+        return {
+            'P/E': info.get('trailingPE', 'Aggregate P/E ~25 (Nifty 50)'),  # Placeholder for index
+            'EPS': 'N/A (Index)',
+            'Revenue (Cr)': 'N/A (Index)',
+            'Profit Margin (%)': 'N/A (Index)',
+            'Market Cap (Cr)': info.get('marketCap', 'N/A (Index Total Cap ~$4.5T)')
+        }
+    else:
+        return {
+            'P/E': info.get('trailingPE', 'N/A'),
+            'EPS': info.get('trailingEps', 'N/A'),
+            'Revenue (Cr)': info.get('totalRevenue', 'N/A') / 10**7,
+            'Profit Margin (%)': info.get('profitMargins', 'N/A') * 100,
+            'Market Cap (Cr)': info.get('marketCap', 'N/A') / 10**7
+        }
 
 # Sentiment Analysis (Placeholder for X API)
 def sentiment_analysis(symbol):
@@ -85,6 +94,12 @@ def main():
         "Tata Consultancy Services": "TCS.NS",
         "UltraTech Cement": "ULTRACEMCO.NS",
         "Wipro": "WIPRO.NS",
+        # Indices
+        "Nifty 50": "^NSEI",
+        "Sensex": "^BSESN",
+        "Nifty Bank": "^NSEBANK",
+        "Nifty IT": "^CNXIT",
+        "Nifty Midcap 100": "^CNXMIDCAP",
         # Additional Popular NSE Stocks (Outside Nifty 50)
         "Hindustan Zinc": "HINDZINC.NS",
         "Trent": "TRENT.NS",
@@ -101,15 +116,26 @@ def main():
         "Macrotech Developers": "LODHA.NS",
         "Phoenix Mills": "PHOENIXLTD.NS"
     }
-    
-    # Add custom stock input
-    custom_stock = st.sidebar.text_input("Enter Custom Stock Symbol (e.g., INFY.NS)", "")
-    if custom_stock:
-        symbol = custom_stock.upper()
-        selected_stock = custom_stock
-    else:
-        selected_stock = st.sidebar.selectbox("Select Stock", options=list(stock_options.keys()), index=0)
-        symbol = stock_options[selected_stock]
+    selected_stock = st.sidebar.selectbox("Select Stock", options=list(stock_options.keys()), index=0)
+    symbol = stock_options[selected_stock]
+
+    # Custom search bar for other stocks
+    st.sidebar.subheader("Or Search for Other Stocks")
+    search_query = st.sidebar.text_input("Enter Stock Name (e.g., 'Infosys')", "")
+    if search_query:
+        # Simulate search (in real app, use web_search tool here)
+        # For demo, map common names to symbols
+        search_map = {
+            "Infosys": "INFY.NS",
+            "Tata Chemicals": "TATACHEM.NS",
+            "HDFC AMC": "HDFCAMC.NS",
+            "Tata Power": "TATAPOWER.NS",
+            "Bharat Electronics": "BEL.NS",
+            # Add more mappings as needed
+        }
+        symbol = search_map.get(search_query, search_query.upper() + ".NS")
+        selected_stock = search_query
+        st.sidebar.write(f"Found: {symbol}")
 
     historical, intraday = fetch_data(symbol)
     ticker = yf.Ticker(symbol)
@@ -119,7 +145,7 @@ def main():
         return
 
     # Analyses
-    fundamentals = fundamental_analysis(ticker)
+    fundamentals = fundamental_analysis(ticker, symbol)
     sentiment = sentiment_analysis(symbol)
     tech_data = technical_analysis(historical)
 
