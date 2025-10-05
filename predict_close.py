@@ -4,6 +4,7 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout, Input
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
 import yfinance as yf
 
 # Set random seed for reproducibility
@@ -19,22 +20,29 @@ def technical_analysis(data):
     loss = -delta.where(delta < 0, 0)
     avg_gain = gain.rolling(window=14).mean()
     avg_loss = loss.rolling(window=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.finfo(float).eps)
+    rs = avg_gain / avg_loss.replace(0, np.finfo(float).eps)  # Avoid division by zero
     data['RSI'] = 100 - (100 / (1 + rs))
     ema12 = data['Close'].ewm(span=12, adjust=False).mean()
     ema26 = data['Close'].ewm(span=26, adjust=False).mean()
     data['MACD'] = ema12 - ema26
     data['MACD_Signal'] = data['MACD'].ewm(span=9, adjust=False).mean()
-    return data.ffill().fillna(0)
+    return data.bfill().ffill().fillna(0)  # Backward then forward fill for better handling
 
 def predict_close(historical, intraday, next_trading_date, symbol):
     try:
         tech_data = technical_analysis(historical)
         data = tech_data[['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD']].values
+        
+        # Drop rows with NaNs
+        data = data[~np.isnan(data).any(axis=1)]
+        if len(data) < 20:  # Minimum for training
+            return None, MinMaxScaler()
+        
         scaler = MinMaxScaler(feature_range=(0, 1))
         scaled_data = scaler.fit_transform(data)
         
-        sequence_length = 15
+        # Shorter sequence for indices
+        sequence_length = 5 if symbol.startswith('^') else 15
         X, y = [], []
         for i in range(sequence_length, len(scaled_data)):
             X.append(scaled_data[i-sequence_length:i, :])
@@ -43,7 +51,16 @@ def predict_close(historical, intraday, next_trading_date, symbol):
         X = np.reshape(X, (X.shape[0], X.shape[1], X.shape[2]))
         
         if len(X) == 0:
-            return None, scaler
+            # Fallback to linear regression for indices or sparse data
+            print("LSTM sequence insufficient. Using linear regression fallback.")
+            X_reg = tech_data[['RSI', 'MACD']].dropna().tail(50).values
+            y_reg = tech_data['Close'].dropna().tail(50).values
+            if len(X_reg) > 1:
+                reg = LinearRegression().fit(X_reg, y_reg)
+                predicted_close = reg.predict(X_reg[-1].reshape(1, -1))[0]
+                return max(0, predicted_close), scaler
+            else:
+                return None, scaler
         
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
         
@@ -53,17 +70,17 @@ def predict_close(historical, intraday, next_trading_date, symbol):
         model.add(Dropout(0.2))
         model.add(LSTM(100))
         model.add(Dropout(0.2))
-        model.add(Dense(1, activation='relu'))  # ReLU ensures non-negative output
+        model.add(Dense(1, activation='relu'))  # ReLU ensures non-negative
         model.compile(optimizer='adam', loss='mean_squared_error')
         model.fit(X_train, y_train, epochs=30, batch_size=32, validation_data=(X_test, y_test), verbose=0)
         
         tech_intraday = technical_analysis(intraday)
         live_data = tech_intraday.tail(1) if not intraday.empty else tech_data.tail(1)
         
-        last_15_data = tech_data[['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD']].values[-15:]
-        if last_15_data.shape[0] < 15:
-            padding = np.zeros((15 - last_15_data.shape[0], 7))
-            last_15_data = np.vstack((padding, last_15_data))
+        last_sequence_data = tech_data[['Open', 'High', 'Low', 'Close', 'Volume', 'RSI', 'MACD']].values[-sequence_length:]
+        if last_sequence_data.shape[0] < sequence_length:
+            padding = np.zeros((sequence_length - last_sequence_data.shape[0], 7))
+            last_sequence_data = np.vstack((padding, last_sequence_data))
         
         latest_close = float(live_data['Close'].iloc[0]) if not live_data.empty else float(tech_data['Close'].iloc[-1])
         today_row = np.array([
@@ -76,14 +93,16 @@ def predict_close(historical, intraday, next_trading_date, symbol):
             float(live_data['MACD'].iloc[0]) if not live_data.empty else float(tech_data['MACD'].iloc[-1])
         ])
         
-        inputs = np.vstack((last_15_data[-14:], today_row.reshape(1, -1)))
+        inputs = np.vstack((last_sequence_data[- (sequence_length - 1):], today_row.reshape(1, -1)))
         inputs = scaler.transform(inputs)
         inputs = np.reshape(inputs, (1, inputs.shape[0], inputs.shape[1]))
         predicted = model.predict(inputs, verbose=0)[0][0]
         dummy_row = np.zeros((1, 7))
         dummy_row[0, 3] = predicted
         predicted_close = scaler.inverse_transform(dummy_row)[0, 3]
-        predicted_close = max(0, predicted_close)  # Final non-negative clamp
+        
+        # Ensure non-negative
+        predicted_close = max(0, predicted_close)
         
         ticker = yf.Ticker(symbol)
         fundamentals = {
@@ -94,7 +113,7 @@ def predict_close(historical, intraday, next_trading_date, symbol):
             'Market Cap (Cr)': ticker.info.get('marketCap', 'N/A') / 10**7
         }
         analyst_targets = {
-            "COALINDIA.NS": 450.00,  # Based on analyst consensus
+            "COALINDIA.NS": 450.00,
             "ADANIPORTS.NS": 1800.00,
             "APOLLOHOSP.NS": 6800.00,
             "ASIANPAINT.NS": 3400.00,
