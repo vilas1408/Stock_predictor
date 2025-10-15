@@ -6,9 +6,12 @@ from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LinearRegression
 import yfinance as yf
+import tensorflow as tf
+import streamlit as st
 
-# Set random seed for reproducibility
+# Set random seeds for reproducibility
 np.random.seed(42)
+tf.random.set_seed(42)
 from tensorflow.keras import backend as K
 K.clear_session()
 
@@ -26,7 +29,20 @@ def technical_analysis(data):
     ema26 = data['Close'].ewm(span=26, adjust=False).mean()
     data['MACD'] = ema12 - ema26
     data['MACD_Signal'] = data['MACD'].ewm(span=9, adjust=False).mean()
-    return data.bfill().ffill().fillna(0)  # Backward then forward fill for better handling
+    return data.bfill().ffill().fillna(0)
+
+@st.cache_resource
+def train_lstm_model(_X_train, _y_train, _X_test, _y_test, input_shape):
+    model = Sequential()
+    model.add(Input(shape=input_shape))
+    model.add(LSTM(100, return_sequences=True))
+    model.add(Dropout(0.2))
+    model.add(LSTM(100))
+    model.add(Dropout(0.2))
+    model.add(Dense(1, activation='relu'))
+    model.compile(optimizer='adam', loss='mean_squared_error')
+    model.fit(_X_train, _y_train, epochs=30, batch_size=32, validation_data=(_X_test, _y_test), verbose=0)
+    return model
 
 def predict_close(historical, intraday, next_trading_date, symbol):
     try:
@@ -35,23 +51,21 @@ def predict_close(historical, intraday, next_trading_date, symbol):
         
         # Drop rows with NaNs
         data = data[~np.isnan(data).any(axis=1)]
-        if len(data) < 20:  # Minimum for training
+        if len(data) < 20:
             return None, MinMaxScaler()
         
         scaler = MinMaxScaler(feature_range=(0, 1))
         scaled_data = scaler.fit_transform(data)
         
-        # Shorter sequence for indices
         sequence_length = 5 if symbol.startswith('^') else 15
         X, y = [], []
         for i in range(sequence_length, len(scaled_data)):
             X.append(scaled_data[i-sequence_length:i, :])
-            y.append(scaled_data[i, 3])  # Close price
+            y.append(scaled_data[i, 3])
         X, y = np.array(X), np.array(y)
         X = np.reshape(X, (X.shape[0], X.shape[1], X.shape[2]))
         
         if len(X) == 0:
-            # Fallback to linear regression for indices or sparse data
             print("LSTM sequence insufficient. Using linear regression fallback.")
             X_reg = tech_data[['RSI', 'MACD']].dropna().tail(50).values
             y_reg = tech_data['Close'].dropna().tail(50).values
@@ -64,15 +78,8 @@ def predict_close(historical, intraday, next_trading_date, symbol):
         
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
         
-        model = Sequential()
-        model.add(Input(shape=(X_train.shape[1], X_train.shape[2])))
-        model.add(LSTM(100, return_sequences=True))
-        model.add(Dropout(0.2))
-        model.add(LSTM(100))
-        model.add(Dropout(0.2))
-        model.add(Dense(1, activation='relu'))  # ReLU ensures non-negative
-        model.compile(optimizer='adam', loss='mean_squared_error')
-        model.fit(X_train, y_train, epochs=30, batch_size=32, validation_data=(X_test, y_test), verbose=0)
+        # Use cached model
+        model = train_lstm_model(X_train, y_train, X_test, y_test, (X_train.shape[1], X_train.shape[2]))
         
         tech_intraday = technical_analysis(intraday)
         live_data = tech_intraday.tail(1) if not intraday.empty else tech_data.tail(1)
@@ -93,7 +100,7 @@ def predict_close(historical, intraday, next_trading_date, symbol):
             float(live_data['MACD'].iloc[0]) if not live_data.empty else float(tech_data['MACD'].iloc[-1])
         ])
         
-        inputs = np.vstack((last_sequence_data[- (sequence_length - 1):], today_row.reshape(1, -1)))
+        inputs = np.vstack((last_sequence_data[-(sequence_length-1):], today_row.reshape(1, -1)))
         inputs = scaler.transform(inputs)
         inputs = np.reshape(inputs, (1, inputs.shape[0], inputs.shape[1]))
         predicted = model.predict(inputs, verbose=0)[0][0]
@@ -118,15 +125,15 @@ def predict_close(historical, intraday, next_trading_date, symbol):
             "APOLLOHOSP.NS": 6800.00,
             "ASIANPAINT.NS": 3400.00,
             "AXISBANK.NS": 1300.00,
-            # Add other targets as needed
+            "SBIN.NS": 750.00,
         }
         analyst_target = analyst_targets.get(symbol, 450.00)
         
-        # Sentiment-based adjustment (simulated as positive)
-        sentiment_boost = 1.05 if "Positive" else 1.0  # 5% boost for positive sentiment
-        if fundamentals['P/E'] != 'N/A' and float(fundamentals['P/E']) < 15:  # Undervalued threshold
+        # Sentiment-based adjustment
+        sentiment_boost = 1.05 if "Positive" else 1.0
+        if fundamentals['P/E'] != 'N/A' and float(fundamentals['P/E']) < 15:
             predicted_close = (predicted_close * 0.7 * sentiment_boost) + (analyst_target * 0.3)
-        predicted_close = max(0, predicted_close)  # Ensure non-negative
+        predicted_close = max(0, predicted_close)
         
         return predicted_close, scaler
     except Exception as e:
@@ -134,8 +141,8 @@ def predict_close(historical, intraday, next_trading_date, symbol):
         return None, None
 
 if __name__ == "__main__":
-    historical = yf.download("COALINDIA.NS", period="1y", interval="1d", auto_adjust=False)
-    intraday = yf.download("COALINDIA.NS", period="1d", interval="5m", prepost=True, auto_adjust=False)
+    historical = yf.download("SBIN.NS", period="1y", interval="1d", auto_adjust=False)
+    intraday = yf.download("SBIN.NS", period="1d", interval="5m", prepost=True, auto_adjust=False)
     from datetime import date
-    predicted_close, _ = predict_close(historical, intraday if not intraday.empty else historical.tail(1), date(2025, 9, 22), "COALINDIA.NS")
+    predicted_close, _ = predict_close(historical, intraday if not intraday.empty else historical.tail(1), date(2025, 10, 16), "SBIN.NS")
     print(f"Predicted Close: ₹{predicted_close:.2f} if not None else 'Failed'")
