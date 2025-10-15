@@ -9,13 +9,13 @@ from predict_close import predict_close
 st.title("Stock Price Predictor with Analyst Insights")
 st.write("Predicting closing price using Fundamental, Sentiment, and Technical Analysis.")
 
-# Fetch data with enhanced retry and error handling
+# Fetch data with corrected yfinance call and robust error handling
 @st.cache_data(ttl=300)
 def fetch_data(symbol, _cache_buster=0):
-    def download_with_retry(ticker, period, interval, retries=5, prepost=False):
+    def download_with_retry(symbol, period, interval, retries=5, prepost=False):
         for attempt in range(retries):
             try:
-                data = ticker.download(period=period, interval=interval, auto_adjust=False, prepost=prepost)
+                data = yf.download(symbol, period=period, interval=interval, auto_adjust=False, prepost=prepost)
                 if not data.empty:
                     return data
                 st.warning(f"Empty data for {symbol} on attempt {attempt + 1}, retrying...")
@@ -26,9 +26,8 @@ def fetch_data(symbol, _cache_buster=0):
         st.error(f"Failed to fetch data for {symbol} after {retries} attempts. Check symbol (e.g., INFY.NS) or try later.")
         return None
 
-    ticker = yf.Ticker(symbol)
-    historical = download_with_retry(ticker, period="1y", interval="1d")
-    intraday = download_with_retry(ticker, period="1d", interval="5m", prepost=True)
+    historical = download_with_retry(symbol, period="1y", interval="1d")
+    intraday = download_with_retry(symbol, period="1d", interval="5m", prepost=True)
     
     if historical is None or historical.empty:
         return None, None
@@ -70,17 +69,16 @@ if 'cache_buster' not in st.session_state:
 stock_symbol = st.selectbox(
     "Select a stock or index (NSE symbols)",
     ["^NSEI", "SBIN.NS", "COALINDIA.NS", "ADANIPORTS.NS", "APOLLOHOSP.NS", "ASIANPAINT.NS", "AXISBANK.NS", "PICCADIL.NS"],
-    index=0
+    index=1  # Default to SBIN.NS to avoid ADANIPORTS.NS issues
 )
 today = datetime.today()
 prediction_date = st.date_input("Select prediction date", min_value=today, max_value=today + timedelta(days=30))
 
-# Fallback symbol if ADANIPORTS.NS fails
-fallback_symbol = "SBIN.NS"
+# Fetch data with fallback
 historical, intraday = fetch_data(stock_symbol, st.session_state.cache_buster)
 if historical is None:
-    st.warning(f"Switching to fallback symbol {fallback_symbol} due to data fetch failure.")
-    stock_symbol = fallback_symbol
+    st.warning(f"Switching to fallback symbol SBIN.NS due to data fetch failure.")
+    stock_symbol = "SBIN.NS"
     st.session_state.cache_buster += 1  # Clear cache
     historical, intraday = fetch_data(stock_symbol, st.session_state.cache_buster)
     if historical is None:
