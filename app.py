@@ -4,15 +4,36 @@ import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta
 from pytz import timezone
+import time  # For retry delays
 
-# Fetch data
-@st.cache_data(ttl=300)  # Cache for 5 minutes during market hours
+# Fetch data with retry
+@st.cache_data(ttl=300)
 def fetch_data(symbol):
-    historical = yf.download(symbol, period="1y", interval="1d", auto_adjust=False)
-    intraday = yf.download(symbol, period="1d", interval="5m", prepost=True, auto_adjust=False)
+    def download_with_retry(ticker, period, interval, retries=3):
+        for attempt in range(retries):
+            try:
+                data = ticker.download(period=period, interval=interval, auto_adjust=False)
+                if not data.empty:
+                    return data
+                else:
+                    print(f"Empty data on attempt {attempt + 1}, retrying...")
+                    time.sleep(2 ** attempt)  # Exponential backoff
+            except Exception as e:
+                print(f"Error on attempt {attempt + 1}: {e}, retrying...")
+                time.sleep(2 ** attempt)
+        st.error(f"Failed to fetch data for {symbol} after {retries} attempts. Check symbol or try later.")
+        return pd.DataFrame()
+
+    ticker = yf.Ticker(symbol)
+    historical = download_with_retry(ticker, period="1y", interval="1d")
+    intraday = download_with_retry(ticker, period="1d", interval="5m", prepost=True)
+    
     if intraday.empty:
         st.warning("No intraday data available (market closed). Using historical fallback.")
         intraday = historical.tail(1)
+    if historical.empty:
+        st.error(f"No historical data available for {symbol}. Check symbol format (e.g., INFY.NS).")
+        return pd.DataFrame(), pd.DataFrame()
     return historical, intraday
 
 # Fundamental Analysis (adjusted for indices)
@@ -22,17 +43,17 @@ def fundamental_analysis(ticker, symbol):
         return {
             'P/E': info.get('trailingPE', 'Aggregate P/E ~25 (Nifty 50)'),  # Placeholder for index
             'EPS': 'N/A (Index)',
-            'Revenue (Cr)': 'N/A (Index)',
+            'Revenue (cr)': 'N/A (Index)',
             'Profit Margin (%)': 'N/A (Index)',
-            'Market Cap (Cr)': info.get('marketCap', 'N/A (Index Total Cap ~$4.5T)')
+            'Market Cap (cr)': info.get('marketCap', 'N/A (Index Total Cap ~$4.5T)')
         }
     else:
         return {
             'P/E': info.get('trailingPE', 'N/A'),
             'EPS': info.get('trailingEps', 'N/A'),
-            'Revenue (Cr)': info.get('totalRevenue', 'N/A') / 10**7,
+            'Revenue (cr)': info.get('totalRevenue', 'N/A') / 10**7,
             'Profit Margin (%)': info.get('profitMargins', 'N/A') * 100,
-            'Market Cap (Cr)': info.get('marketCap', 'N/A') / 10**7
+            'Market Cap (cr)': info.get('marketCap', 'N/A') / 10**7
         }
 
 # Sentiment Analysis (Placeholder for X API)
